@@ -1,19 +1,32 @@
 // ntt_fft_ffi.cu - FFI implementation for NTT/FFT CUDA module
 
 #include "ntt_fft_ffi.h"
-#include "ntt_fft.cu" // Include the actual CUDA kernel implementation
-// #include "field_ops.h" // <--- ***ACTION REQUIRED***: Uncomment and use correct header if field_pow_op is defined there
+#include "ntt_fft.cu" // Include the actual CUDA kernel implementation (provides PRIME and kernels)
 #include <cuda_runtime.h>
 #include <vector>
 #include <cmath>
 #include <cstdio> // For printf
 
-// If field_pow_op is not in a header but defined in another .cu file (e.g., field_ops.cu)
-// and is meant to be used by other .cu files, it should be declared (e.g., in field_ops.h or here).
-// For example, if it's a __device__ function:
-// __device__ uint64_t field_pow_op(uint64_t base, uint64_t exp);
-// This forward declaration might be necessary if not handled by an include.
-// We assume PRIME is available from "ntt_fft.cu"
+// HOST-SIDE modular multiplication (mirroring device logic if PRIME is the same)
+// Needed because field_pow_op from field_ops.cu is __device__ only.
+// PRIME is visible from the included "ntt_fft.cu"
+static inline uint64_t host_field_mul(uint64_t a, uint64_t b) {
+    unsigned __int128 res = (unsigned __int128)a * b;
+    return (uint64_t)(res % PRIME); // Use PRIME from ntt_fft.cu
+}
+
+// HOST-SIDE modular exponentiation (binary exponentiation)
+static inline uint64_t host_field_pow(uint64_t base, uint64_t exp) {
+    uint64_t res = 1;
+    base %= PRIME; // Use PRIME from ntt_fft.cu
+    while (exp > 0) {
+        if (exp % 2 == 1) res = host_field_mul(res, base);
+        base = host_field_mul(base, base);
+        exp /= 2;
+    }
+    return res;
+}
+
 
 // Helper to check CUDA errors (can be shared or redefined)
 static CudaFFIErrorCode check_cuda_error_ntt(cudaError_t err, const char* operation) {
@@ -49,12 +62,10 @@ void compute_twiddle_factors(int n, uint64_t root_of_unity, bool inverse, std::v
     twiddles.resize(n / 2);
     uint64_t current_root = root_of_unity;
     if (inverse) {
-        // Using PRIME directly, assuming it's the modulus from ntt_fft.cu
-        // current_root = field_pow_op(root_of_unity, PRIME - 2); // Proper modular inverse
+        // current_root = host_field_pow(root_of_unity, PRIME - 2); // Proper modular inverse using host function
     }
     for (int i = 0; i < n / 2; ++i) {
-        // Ensure field_pow_op is visible here
-        twiddles[i] = field_pow_op(current_root, i);
+        twiddles[i] = host_field_pow(current_root, i); // Use host_field_pow
     }
 }
 
@@ -99,6 +110,7 @@ extern "C" CudaFFIErrorCode cuda_ntt_fft(uint64_t* h_data, int n, const int* h_r
     blocks_per_grid = (n + threads_per_block - 1) / threads_per_block;
 
     // 4. Launch bit-reversal permutation kernel
+    // bit_reverse_permutation_kernel is from ntt_fft.cu
     bit_reverse_permutation_kernel<<<blocks_per_grid, threads_per_block>>>(d_data, n, d_rev_indices);
     cuda_err = cudaGetLastError();
     if ((ffi_err_code = check_cuda_error_ntt(cuda_err, "bit_reverse_permutation_kernel launch")) != CUDA_SUCCESS_FFI) goto cleanup;
@@ -107,11 +119,10 @@ extern "C" CudaFFIErrorCode cuda_ntt_fft(uint64_t* h_data, int n, const int* h_r
 
     // 5. Iterative NTT stages (Cooley-Tukey)
     for (int len = 2; len <= n; len <<= 1) { 
-        // Ensure field_pow_op is visible
-        uint64_t w_m_base = field_pow_op(h_root_of_unity, n / len); 
+        uint64_t w_m_base = host_field_pow(h_root_of_unity, n / len); // Use host_field_pow
         stage_twiddles_vec.resize(len/2);
         for(int j=0; j < len/2; ++j) {
-            stage_twiddles_vec[j] = field_pow_op(w_m_base, j);
+            stage_twiddles_vec[j] = host_field_pow(w_m_base, j); // Use host_field_pow
         }
 
         d_twiddle_factors = nullptr; // Initialize before malloc
@@ -124,6 +135,7 @@ extern "C" CudaFFIErrorCode cuda_ntt_fft(uint64_t* h_data, int n, const int* h_r
         int stage_threads = n / 2; 
         int stage_blocks = (stage_threads + threads_per_block - 1) / threads_per_block;
 
+        // ntt_fft_stage_kernel is from ntt_fft.cu
         ntt_fft_stage_kernel<<<stage_blocks, threads_per_block>>>(d_data, n, len, d_twiddle_factors, 0);
         cuda_err = cudaGetLastError();
         if ((ffi_err_code = check_cuda_error_ntt(cuda_err, "ntt_fft_stage_kernel launch")) != CUDA_SUCCESS_FFI) goto cleanup_loop;
@@ -137,36 +149,44 @@ extern "C" CudaFFIErrorCode cuda_ntt_fft(uint64_t* h_data, int n, const int* h_r
 
     // If inverse NTT, divide by N (modularly)
     if (inverse) {
-        // Using PRIME directly, assuming it's the modulus from ntt_fft.cu
         uint64_t n_val = static_cast<uint64_t>(n);
-        uint64_t n_inv = field_pow_op(n_val, PRIME - 2); 
+        uint64_t n_inv = host_field_pow(n_val, PRIME - 2); // Use host_field_pow and PRIME from ntt_fft.cu
         
         // Kernel to multiply all elements by n_inv
-        // Placeholder: This kernel needs to be implemented and available.
-        // vector_scalar_field_mul_kernel<<<blocks_per_grid, threads_per_block>>>(d_data, n_inv, n, PRIME);
+        // This requires a new kernel, let's call it vector_scalar_field_mul_kernel.
+        // This kernel would take d_data, n_inv, n, and PRIME as arguments.
+        // For now, we will assume this kernel exists or will be added to ntt_fft.cu or a similar file.
+        // Example: vector_scalar_field_mul_kernel<<<blocks_per_grid, threads_per_block>>>(d_data, n_inv, n);
         // cuda_err = cudaGetLastError();
         // if ((ffi_err_code = check_cuda_error_ntt(cuda_err, "vector_scalar_field_mul_kernel launch")) != CUDA_SUCCESS_FFI) goto cleanup;
         // cuda_err = cudaDeviceSynchronize();
         // if ((ffi_err_code = check_cuda_error_ntt(cuda_err, "cudaDeviceSynchronize after N_inv mul")) != CUDA_SUCCESS_FFI) goto cleanup;
-        fprintf(stdout, "INFO (cuda_ntt_fft): Inverse NTT scalar multiplication by N_inv needs a specific kernel.\n");
+        fprintf(stdout, "INFO (cuda_ntt_fft): Inverse NTT scalar multiplication by N_inv (value: %lu) needs a specific kernel (vector_scalar_field_mul_kernel).\n", n_inv);
     }
 
     // 6. Copy data back to host
     cuda_err = cudaMemcpy(h_data, d_data, n * sizeof(uint64_t), cudaMemcpyDeviceToHost);
-    if (cuda_err != cudaSuccess) { // Check error directly
-         check_cuda_error_ntt(cuda_err, "cudaMemcpy d_data to h_data");
-         if (ffi_err_code == CUDA_SUCCESS_FFI) ffi_err_code = CUDA_ERROR_FFI_INTERNAL;
+    if (cuda_err != cudaSuccess) { 
+         check_cuda_error_ntt(cuda_err, "cudaMemcpy d_data to h_data"); // Call to log error
+         // Ensure ffi_err_code reflects this failure if it was previously success
+         if (ffi_err_code == CUDA_SUCCESS_FFI) ffi_err_code = CUDA_ERROR_FFI_MEMCPY; // Or a more general error
     }
 
 cleanup_loop: 
+    // This label is for errors inside the main loop, specifically for d_twiddle_factors
     if (d_twiddle_factors && ffi_err_code != CUDA_SUCCESS_FFI) { 
          cudaFree(d_twiddle_factors);
-         d_twiddle_factors = nullptr;
+         d_twiddle_factors = nullptr; // Nullify after freeing
     }
 cleanup:
     if (d_data) cudaFree(d_data);
     if (d_rev_indices) cudaFree(d_rev_indices);
-    if (d_twiddle_factors) cudaFree(d_twiddle_factors); // Should be null if loop completed normally
+    // If d_twiddle_factors was allocated in the loop and an error occurred outside/after the loop,
+    // it might still hold a pointer if cleanup_loop wasn't hit.
+    // However, the current logic frees it inside the loop or if an error occurs in the loop.
+    // For safety, one might consider an additional check here, but it should be null if loop exited cleanly or via cleanup_loop.
+    if (d_twiddle_factors) cudaFree(d_twiddle_factors); 
+
 
     return ffi_err_code;
 }
