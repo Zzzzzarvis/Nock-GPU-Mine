@@ -17,17 +17,20 @@ static CudaFFIErrorCode check_cuda_error_hash_ops(cudaError_t err, const char* o
 }
 
 extern "C" CudaFFIErrorCode cuda_sha_hash(const uint8_t* h_input_data, uint32_t input_len, uint32_t* h_output_hash) {
-    if (!h_input_data || input_len == 0 || !h_output_hash) {
-        return CUDA_ERROR_FFI_INVALID_ARGS;
-    }
-
+    // 变量声明移到函数体最开始
     uint8_t* d_input_data = nullptr;
     uint32_t* d_output_hash = nullptr;
     CudaFFIErrorCode ffi_err_code = CUDA_SUCCESS_FFI;
     cudaError_t cuda_err;
+    size_t output_size_bytes = 8 * sizeof(uint32_t); // Assuming SHA256, output is 32 bytes (8 * uint32_t)
+    int threads_per_block = 1; // Kernel launch parameters for SHA
+    int blocks_per_grid = 1;   // For the placeholder, we launch a single thread.
 
-    // Assuming SHA256, output is 32 bytes (8 * uint32_t)
-    size_t output_size_bytes = 8 * sizeof(uint32_t);
+    // 参数检查
+    if (!h_input_data || input_len == 0 || !h_output_hash) {
+        fprintf(stderr, "Error (cuda_sha_hash): Invalid arguments. Null pointers or zero input_len.\n");
+        return CUDA_ERROR_FFI_INVALID_ARGS;
+    }
 
     cuda_err = cudaMalloc((void**)&d_input_data, input_len * sizeof(uint8_t));
     if ((ffi_err_code = check_cuda_error_hash_ops(cuda_err, "cudaMalloc d_input_data (SHA)")) != CUDA_SUCCESS_FFI) goto cleanup;
@@ -37,14 +40,13 @@ extern "C" CudaFFIErrorCode cuda_sha_hash(const uint8_t* h_input_data, uint32_t 
     cuda_err = cudaMemcpy(d_input_data, h_input_data, input_len * sizeof(uint8_t), cudaMemcpyHostToDevice);
     if ((ffi_err_code = check_cuda_error_hash_ops(cuda_err, "cudaMemcpy h_input_data to d_input_data (SHA)")) != CUDA_SUCCESS_FFI) goto cleanup;
 
-    // Kernel launch parameters for SHA (highly dependent on actual kernel implementation)
-    // For the placeholder, we launch a single thread.
-    int threads_per_block = 1;
-    int blocks_per_grid = 1;
-
     sha_kernel<<<blocks_per_grid, threads_per_block>>>(d_input_data, input_len, d_output_hash);
-    cuda_err = cudaGetLastError();
+    cuda_err = cudaGetLastError(); // 检查内核启动错误
     if ((ffi_err_code = check_cuda_error_hash_ops(cuda_err, "sha_kernel launch")) != CUDA_SUCCESS_FFI) goto cleanup;
+    
+    // 通常在内核启动后立即检查错误，cudaDeviceSynchronize 主要用于确保所有之前的CUDA操作完成
+    // 如果后续的cudaMemcpy不依赖于内核完成（例如异步操作），则同步是必要的
+    // 但如果内核是同步的或后续操作会隐式同步，则可能不是严格必需的，但加上更安全
     cuda_err = cudaDeviceSynchronize();
     if ((ffi_err_code = check_cuda_error_hash_ops(cuda_err, "cudaDeviceSynchronize after sha_kernel")) != CUDA_SUCCESS_FFI) goto cleanup;
 
@@ -58,18 +60,24 @@ cleanup:
 }
 
 extern "C" CudaFFIErrorCode cuda_tip5_hash(const uint64_t* h_input_state, uint64_t* h_output_state, int state_len) {
+    // 变量声明移到函数体最开始
+    uint64_t* d_input_state = nullptr;
+    uint64_t* d_output_state = nullptr;
+    CudaFFIErrorCode ffi_err_code = CUDA_SUCCESS_FFI;
+    cudaError_t cuda_err;
+    size_t state_size_bytes; // 在参数检查后赋值
+    int threads_per_block = 1; // Kernel launch parameters for TIP5
+    int blocks_per_grid = 1;   // For the placeholder, we launch a single thread.
+
+    // 参数检查
     if (!h_input_state || !h_output_state || state_len <= 0) {
+        fprintf(stderr, "Error (cuda_tip5_hash): Invalid arguments. Null pointers or non-positive state_len.\n");
         return CUDA_ERROR_FFI_INVALID_ARGS;
     }
     // Assuming TIP5 state_len is fixed, e.g., 5 for some sponge constructions.
     // Add validation for state_len if necessary.
 
-    uint64_t* d_input_state = nullptr;
-    uint64_t* d_output_state = nullptr;
-    CudaFFIErrorCode ffi_err_code = CUDA_SUCCESS_FFI;
-    cudaError_t cuda_err;
-
-    size_t state_size_bytes = state_len * sizeof(uint64_t);
+    state_size_bytes = state_len * sizeof(uint64_t);
 
     cuda_err = cudaMalloc((void**)&d_input_state, state_size_bytes);
     if ((ffi_err_code = check_cuda_error_hash_ops(cuda_err, "cudaMalloc d_input_state (TIP5)")) != CUDA_SUCCESS_FFI) goto cleanup;
@@ -79,14 +87,10 @@ extern "C" CudaFFIErrorCode cuda_tip5_hash(const uint64_t* h_input_state, uint64
     cuda_err = cudaMemcpy(d_input_state, h_input_state, state_size_bytes, cudaMemcpyHostToDevice);
     if ((ffi_err_code = check_cuda_error_hash_ops(cuda_err, "cudaMemcpy h_input_state to d_input_state (TIP5)")) != CUDA_SUCCESS_FFI) goto cleanup;
 
-    // Kernel launch parameters for TIP5 (highly dependent on actual kernel implementation)
-    // For the placeholder, we launch a single thread.
-    int threads_per_block = 1;
-    int blocks_per_grid = 1;
-
     tip5_kernel<<<blocks_per_grid, threads_per_block>>>(d_input_state, d_output_state);
-    cuda_err = cudaGetLastError();
+    cuda_err = cudaGetLastError(); // 检查内核启动错误
     if ((ffi_err_code = check_cuda_error_hash_ops(cuda_err, "tip5_kernel launch")) != CUDA_SUCCESS_FFI) goto cleanup;
+
     cuda_err = cudaDeviceSynchronize();
     if ((ffi_err_code = check_cuda_error_hash_ops(cuda_err, "cudaDeviceSynchronize after tip5_kernel")) != CUDA_SUCCESS_FFI) goto cleanup;
 
@@ -98,4 +102,3 @@ cleanup:
     if (d_output_state) cudaFree(d_output_state);
     return ffi_err_code;
 }
-
